@@ -1,0 +1,68 @@
+name: Android Test APK
+on:
+  push:
+    paths:
+      - '.github/workflows/android-test.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$SDK/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: android-test
+      - run: pnpm install --frozen-lockfile
+      - name: Type check and frontend build
+        run: pnpm build
+      - run: pnpm tauri android init --ci
+      - name: Build ARM64 APK
+        run: pnpm tauri android build --apk --target aarch64
+      - name: Sign and verify test APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/test.keystore"
+          keytool -genkeypair -keystore "$KS" -alias hghub-test -storepass android -keypass android -dname "CN=HGhub Personal Test" -keyalg RSA -keysize 2048 -validity 3650
+          APK="$(find src-tauri/gen/android/app/build/outputs/apk -name '*release*.apk' -print -quit)"
+          test -n "$APK"
+          mkdir -p artifacts
+          BT="$ANDROID_SDK_ROOT/build-tools/36.0.0"
+          "$BT/zipalign" -f -p 4 "$APK" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign --ks "$KS" --ks-key-alias hghub-test --ks-pass pass:android --key-pass pass:android --out artifacts/HGhub-1.2.1-arm64-test.apk "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --verbose artifacts/HGhub-1.2.1-arm64-test.apk
+          sha256sum artifacts/*.apk > artifacts/SHA256SUMS.txt
+          rm -f "$KS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HGhub-Android-ARM64
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
